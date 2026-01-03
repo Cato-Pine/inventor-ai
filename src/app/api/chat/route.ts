@@ -57,7 +57,7 @@ export async function POST(request: Request) {
           project_id: projectId || null,
           agent_type: 'assistant',
           title: message.substring(0, 100), // Use first part of message as title
-        })
+        } as any)
         .select()
         .single()
 
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'Failed to create conversation' }, { status: 500 })
       }
 
-      activeConversationId = newConversation.id
+      activeConversationId = (newConversation as any).id
     }
 
     // Get conversation history if exists

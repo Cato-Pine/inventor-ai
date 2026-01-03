@@ -124,7 +124,7 @@ export async function POST(request: Request) {
           timestamp: new Date().toISOString(),
         },
         importance_score: overall_novelty_score,
-      })
+      } as any)
     }
 
     return NextResponse.json(response)

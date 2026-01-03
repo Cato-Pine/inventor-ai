@@ -1,0 +1,521 @@
+// USPTO PTAB API Client
+// Searches IPR/PGR/CBM trials, decisions, and ex parte appeals
+//
+// IMPORTANT: Uses api.uspto.gov (not data.uspto.gov)
+// - data.uspto.gov returns "Please use api.uspto.gov" error
+// - api.uspto.gov requires GET with query params (not POST with JSON body)
+//
+// Documentation:
+// - Getting Started: https://data.uspto.gov/apis/getting-started
+// - Rate Limits: https://data.uspto.gov/apis/api-rate-limits
+//
+// Authentication:
+// 1. Create USPTO.gov account + ID.me verification
+// 2. Get API key from "My ODP" page
+// 3. Set environment variable: USPTO_API_KEY
+// 4. Header: X-API-Key
+//
+// API Parameters:
+// - q: Lucene query string (e.g., "*:*" for all, "patentNumber:12345678")
+// - offset: Starting position (default 0)
+// - limit: Number of results (default 20)
+
+export interface USPTOSearchParams {
+  query: string
+  start?: number
+  rows?: number
+  sort?: string
+}
+
+// API response structure from api.uspto.gov (nested format)
+export interface USPTOProceeding {
+  trialNumber: string
+  lastModifiedDateTime?: string
+  patentOwnerData?: {
+    patentNumber: string
+    grantDate?: string
+    technologyCenterNumber?: string
+    groupArtUnitNumber?: string
+    applicationNumberText?: string
+    inventorName?: string
+  }
+  trialMetaData?: {
+    trialTypeCode: 'IPR' | 'PGR' | 'CBM'
+    fileDownloadURI?: string
+    trialStatusCategory?: string
+    trialLastModifiedDate?: string
+    petitionFilingDate?: string
+    trialLastModifiedDateTime?: string
+    institutionDecisionDate?: string
+    finalDecisionDate?: string
+  }
+  regularPetitionerData?: {
+    realPartyInInterestName?: string
+    counselName?: string
+  }
+  // Legacy flat fields (keep for backward compatibility)
+  patentNumber?: string
+  patentTitle?: string
+  filingDate?: string
+  petitionerPartyName?: string
+  patentOwnerPartyName?: string
+  trialTypeCode?: 'IPR' | 'PGR' | 'CBM'
+  prosecutionStatus?: string
+  accordedFilingDate?: string
+  institutionDecisionDate?: string
+  finalDecisionDate?: string
+}
+
+export interface USPTODecision {
+  documentIdentifier: string
+  patentNumber: string
+  patentTitle: string
+  trialNumber: string
+  decisionTypeCode: string
+  decisionDate: string
+  documentName: string
+  decisionOutcome?: string
+}
+
+export interface USPTOAppealDecision {
+  documentIdentifier: string
+  patentNumber: string
+  applicationNumber: string
+  decisionDate: string
+  documentTitle: string
+  technologyCenter?: string
+  outcome?: string
+}
+
+export interface USPTOSearchResult<T> {
+  results: T[]
+  recordTotalQuantity: number
+  status: 'success' | 'error'
+  error?: string
+}
+
+export interface PatentReference {
+  patentNumber: string
+  title: string
+  filingDate: string
+  status: string
+  source: 'USPTO_PTAB' | 'USPTO_APPEALS'
+  trialType?: string
+  url: string
+  relevanceContext?: string
+}
+
+// IMPORTANT: Use api.uspto.gov (not data.uspto.gov which returns "use api.uspto.gov" error)
+// Method: GET with query params (not POST with JSON body)
+const USPTO_BASE_URL = 'https://api.uspto.gov'
+
+const ENDPOINTS = {
+  proceedings: '/api/v1/patent/trials/proceedings/search',
+  decisions: '/api/v1/patent/trials/decisions/search',
+  appeals: '/api/v1/patent/appeals/decisions/search',
+} as const
+
+/**
+ * USPTO PTAB API Client
+ * Handles authentication and rate limiting for USPTO PTAB API v3
+ */
+export class USPTOClient {
+  private apiKey: string
+  private lastRequestTime = 0
+  private readonly minRequestInterval = 1000 // 1 second between requests (60/min limit)
+
+  constructor(apiKey?: string) {
+    const key = apiKey || process.env.USPTO_API_KEY
+    if (!key) {
+      throw new Error('USPTO_API_KEY is required. Set it in environment variables.')
+    }
+    this.apiKey = key
+  }
+
+  /**
+   * Enforces rate limiting - waits if necessary to respect 60 req/min limit
+   */
+  private async enforceRateLimit(): Promise<void> {
+    const now = Date.now()
+    const timeSinceLastRequest = now - this.lastRequestTime
+    if (timeSinceLastRequest < this.minRequestInterval) {
+      await new Promise(resolve =>
+        setTimeout(resolve, this.minRequestInterval - timeSinceLastRequest)
+      )
+    }
+    this.lastRequestTime = Date.now()
+  }
+
+  /**
+   * Makes authenticated request to USPTO API
+   * IMPORTANT: Uses GET with query params (not POST with JSON body)
+   * api.uspto.gov requires query string params, not JSON body
+   */
+  private async makeRequest<T>(
+    endpoint: string,
+    params: Record<string, unknown>
+  ): Promise<USPTOSearchResult<T>> {
+    await this.enforceRateLimit()
+
+    try {
+      // Build query string from params
+      const queryParams = new URLSearchParams()
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined && value !== null) {
+          queryParams.append(key, String(value))
+        }
+      }
+
+      const url = `${USPTO_BASE_URL}${endpoint}?${queryParams.toString()}`
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'X-API-Key': this.apiKey,
+          'Accept': 'application/json',
+        },
+      })
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          throw new Error(
+            'USPTO API authentication failed. API key requires ID.me verification. ' +
+            'See: https://data.uspto.gov/apis/getting-started'
+          )
+        }
+        if (response.status === 400) {
+          const errorBody = await response.text()
+          throw new Error(`USPTO API bad request: ${errorBody}`)
+        }
+        if (response.status === 429) {
+          throw new Error('USPTO API rate limit exceeded. Please wait before retrying.')
+        }
+        throw new Error(`USPTO API error: ${response.status} ${response.statusText}`)
+      }
+
+      const data = await response.json()
+
+      // api.uspto.gov uses different field names:
+      // - count (not recordTotalQuantity)
+      // - patentTrialProceedingDataBag (for proceedings)
+      // - patentTrialDecisionDataBag (for decisions)
+      // - patentAppealDecisionDataBag (for appeals)
+      const results = data.patentTrialProceedingDataBag ||
+        data.patentTrialDecisionDataBag ||
+        data.patentAppealDecisionDataBag ||
+        data.results ||
+        []
+
+      return {
+        results,
+        recordTotalQuantity: data.count || data.recordTotalQuantity || 0,
+        status: 'success',
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      console.error('USPTO API request failed:', errorMessage)
+
+      return {
+        results: [],
+        recordTotalQuantity: 0,
+        status: 'error',
+        error: errorMessage,
+      }
+    }
+  }
+
+  /**
+   * Search PTAB proceedings (IPR, PGR, CBM trials)
+   * ODP v3 uses: q, offset, limit (not query, start, rows)
+   */
+  async searchProceedings(params: USPTOSearchParams): Promise<USPTOSearchResult<USPTOProceeding>> {
+    return this.makeRequest<USPTOProceeding>(ENDPOINTS.proceedings, {
+      q: params.query,
+      offset: params.start || 0,
+      limit: params.rows || 20,
+      sort: params.sort || 'accordedFilingDate desc',
+    })
+  }
+
+  /**
+   * Search PTAB decisions
+   * ODP v3 uses: q, offset, limit (not query, start, rows)
+   */
+  async searchDecisions(params: USPTOSearchParams): Promise<USPTOSearchResult<USPTODecision>> {
+    return this.makeRequest<USPTODecision>(ENDPOINTS.decisions, {
+      q: params.query,
+      offset: params.start || 0,
+      limit: params.rows || 20,
+      sort: params.sort || 'decisionDate desc',
+    })
+  }
+
+  /**
+   * Search ex parte appeal decisions
+   * ODP v3 uses: q, offset, limit (not query, start, rows)
+   */
+  async searchAppeals(params: USPTOSearchParams): Promise<USPTOSearchResult<USPTOAppealDecision>> {
+    return this.makeRequest<USPTOAppealDecision>(ENDPOINTS.appeals, {
+      q: params.query,
+      offset: params.start || 0,
+      limit: params.rows || 20,
+      sort: params.sort || 'decisionDate desc',
+    })
+  }
+}
+
+/**
+ * Builds a Lucene query string for USPTO searches
+ */
+export function buildUSPTOQuery(keywords: string[], options?: {
+  patentNumberRange?: { from: number; to: number }
+  trialType?: 'IPR' | 'PGR' | 'CBM'
+  dateRange?: { field: string; from: string; to: string }
+}): string {
+  const parts: string[] = []
+
+  // Add keyword search - search in title and description fields
+  if (keywords.length > 0) {
+    const keywordQuery = keywords
+      .map(k => k.includes(' ') ? `"${k}"` : k)
+      .join(' OR ')
+    parts.push(`(patentTitle:(${keywordQuery}) OR inventionTitle:(${keywordQuery}))`)
+  }
+
+  // Add patent number range if specified
+  if (options?.patentNumberRange) {
+    parts.push(`patentNumber:[${options.patentNumberRange.from} TO ${options.patentNumberRange.to}]`)
+  }
+
+  // Add trial type filter
+  if (options?.trialType) {
+    parts.push(`trialMetaData.trialTypeCode:${options.trialType}`)
+  }
+
+  // Add date range
+  if (options?.dateRange) {
+    parts.push(`${options.dateRange.field}:[${options.dateRange.from} TO ${options.dateRange.to}]`)
+  }
+
+  return parts.join(' AND ') || '*:*'
+}
+
+/**
+ * Generates a clickable URL for a patent
+ */
+export function getPatentUrl(patentNumber: string): string {
+  // Clean the patent number (remove dashes, spaces, etc.)
+  const cleanNumber = patentNumber.replace(/[\s-]/g, '').toUpperCase()
+
+  // Use Google Patents for better accessibility
+  return `https://patents.google.com/patent/US${cleanNumber}`
+}
+
+/**
+ * Generates a URL to USPTO PTAB portal for a specific trial
+ */
+export function getPTABTrialUrl(trialNumber: string): string {
+  return `https://ptab.uspto.gov/#/trials/${trialNumber}`
+}
+
+/**
+ * Converts USPTO API results to standardized PatentReference format
+ * Handles nested structure from api.uspto.gov
+ */
+export function proceedingToPatentReference(proc: USPTOProceeding): PatentReference {
+  // Handle nested structure from api.uspto.gov
+  const patentNumber = proc.patentOwnerData?.patentNumber || proc.patentNumber || ''
+  const trialType = proc.trialMetaData?.trialTypeCode || proc.trialTypeCode || 'IPR'
+  const filingDate = proc.trialMetaData?.petitionFilingDate || proc.accordedFilingDate || proc.filingDate || ''
+  const status = proc.trialMetaData?.trialStatusCategory || proc.prosecutionStatus || 'Unknown'
+  const petitioner = proc.regularPetitionerData?.realPartyInInterestName || proc.petitionerPartyName || 'Unknown'
+  const inventorName = proc.patentOwnerData?.inventorName || proc.patentOwnerPartyName || 'Unknown'
+
+  return {
+    patentNumber,
+    title: inventorName, // API doesn't provide title, use inventor name as fallback
+    filingDate,
+    status,
+    source: 'USPTO_PTAB',
+    trialType,
+    url: getPatentUrl(patentNumber),
+    relevanceContext: `${trialType} proceeding (${proc.trialNumber}): ${petitioner} vs Patent Owner`,
+  }
+}
+
+export function decisionToPatentReference(dec: USPTODecision): PatentReference {
+  return {
+    patentNumber: dec.patentNumber,
+    title: dec.patentTitle || dec.documentName || 'Title not available',
+    filingDate: dec.decisionDate,
+    status: dec.decisionOutcome || dec.decisionTypeCode || 'Decision rendered',
+    source: 'USPTO_PTAB',
+    url: getPatentUrl(dec.patentNumber),
+    relevanceContext: `PTAB Decision: ${dec.documentName}`,
+  }
+}
+
+export function appealToPatentReference(appeal: USPTOAppealDecision): PatentReference {
+  return {
+    patentNumber: appeal.patentNumber || appeal.applicationNumber,
+    title: appeal.documentTitle || 'Title not available',
+    filingDate: appeal.decisionDate,
+    status: appeal.outcome || 'Appeal decided',
+    source: 'USPTO_APPEALS',
+    url: appeal.patentNumber ? getPatentUrl(appeal.patentNumber) : `https://patents.google.com/patent/US${appeal.applicationNumber}`,
+    relevanceContext: appeal.technologyCenter
+      ? `Ex Parte Appeal - Technology Center: ${appeal.technologyCenter}`
+      : 'Ex Parte Appeal Decision',
+  }
+}
+
+/**
+ * Performs a comprehensive USPTO search across all endpoints
+ * Returns combined results from proceedings, decisions, and appeals
+ */
+export async function searchUSPTOComprehensive(
+  keywords: string[],
+  options?: {
+    maxResultsPerEndpoint?: number
+    includeProceedings?: boolean
+    includeDecisions?: boolean
+    includeAppeals?: boolean
+  }
+): Promise<{
+  patents: PatentReference[]
+  totalCount: number
+  errors: string[]
+}> {
+  const apiKey = process.env.USPTO_API_KEY
+  if (!apiKey) {
+    return {
+      patents: [],
+      totalCount: 0,
+      errors: ['USPTO_API_KEY not configured. Please add it to your environment variables.'],
+    }
+  }
+
+  const client = new USPTOClient(apiKey)
+  const query = buildUSPTOQuery(keywords)
+  const maxResults = options?.maxResultsPerEndpoint || 10
+
+  const includeProceedings = options?.includeProceedings !== false
+  const includeDecisions = options?.includeDecisions !== false
+  const includeAppeals = options?.includeAppeals !== false
+
+  const patents: PatentReference[] = []
+  const errors: string[] = []
+  let totalCount = 0
+
+  // Search proceedings
+  if (includeProceedings) {
+    const procResult = await client.searchProceedings({ query, rows: maxResults })
+    if (procResult.status === 'error') {
+      errors.push(`Proceedings search failed: ${procResult.error}`)
+    } else {
+      patents.push(...procResult.results.map(proceedingToPatentReference))
+      totalCount += procResult.recordTotalQuantity
+    }
+  }
+
+  // Search decisions
+  if (includeDecisions) {
+    const decResult = await client.searchDecisions({ query, rows: maxResults })
+    if (decResult.status === 'error') {
+      errors.push(`Decisions search failed: ${decResult.error}`)
+    } else {
+      patents.push(...decResult.results.map(decisionToPatentReference))
+      totalCount += decResult.recordTotalQuantity
+    }
+  }
+
+  // Search appeals
+  if (includeAppeals) {
+    const appealResult = await client.searchAppeals({ query, rows: maxResults })
+    if (appealResult.status === 'error') {
+      errors.push(`Appeals search failed: ${appealResult.error}`)
+    } else {
+      patents.push(...appealResult.results.map(appealToPatentReference))
+      totalCount += appealResult.recordTotalQuantity
+    }
+  }
+
+  // Deduplicate by patent number
+  const seen = new Set<string>()
+  const uniquePatents = patents.filter(p => {
+    if (seen.has(p.patentNumber)) return false
+    seen.add(p.patentNumber)
+    return true
+  })
+
+  return {
+    patents: uniquePatents,
+    totalCount,
+    errors,
+  }
+}
+
+/**
+ * Extracts relevant keywords from an invention description for patent search
+ */
+export function extractPatentKeywords(
+  inventionName: string,
+  description: string,
+  keyFeatures?: string[]
+): string[] {
+  // Combine all text sources
+  const allText = [
+    inventionName,
+    description,
+    ...(keyFeatures || []),
+  ].join(' ')
+
+  // Common words to exclude from patent searches
+  const stopWords = new Set([
+    'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+    'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during',
+    'before', 'after', 'above', 'below', 'between', 'under', 'again',
+    'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why',
+    'how', 'all', 'each', 'few', 'more', 'most', 'other', 'some', 'such',
+    'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+    'can', 'will', 'just', 'should', 'now', 'that', 'this', 'which', 'what',
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+    'having', 'do', 'does', 'did', 'doing', 'would', 'could', 'might', 'must',
+    'shall', 'it', 'its', 'they', 'them', 'their', 'we', 'us', 'our', 'you',
+    'your', 'i', 'my', 'me', 'he', 'she', 'him', 'her', 'his', 'hers',
+    'invention', 'device', 'method', 'system', 'apparatus', 'product', 'solution',
+    'user', 'users', 'using', 'use', 'used', 'provide', 'provides', 'provided',
+    'include', 'includes', 'included', 'including', 'also', 'new', 'novel',
+  ])
+
+  // Extract words and filter
+  const words = allText
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(word =>
+      word.length > 2 &&
+      !stopWords.has(word) &&
+      !/^\d+$/.test(word)
+    )
+
+  // Count word frequency
+  const wordCount = new Map<string, number>()
+  words.forEach(word => {
+    wordCount.set(word, (wordCount.get(word) || 0) + 1)
+  })
+
+  // Sort by frequency and take top keywords
+  const sortedWords = [...wordCount.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([word]) => word)
+    .slice(0, 10)
+
+  // Also extract multi-word phrases (bigrams) that appear in the invention name
+  const namePhrases = inventionName
+    .toLowerCase()
+    .split(/[,;]/)
+    .map(phrase => phrase.trim())
+    .filter(phrase => phrase.length > 3 && phrase.split(' ').length <= 4)
+
+  return [...new Set([...namePhrases, ...sortedWords])]
+}
