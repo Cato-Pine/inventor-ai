@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Image from 'next/image'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { ExternalLink, ChevronDown, ChevronUp } from 'lucide-react'
@@ -49,11 +50,13 @@ export function FindingCard({
           {/* Image (if available) */}
           {finding.imageUrl && (
             <div className="shrink-0">
-              <div className="w-20 h-20 rounded-md bg-neutral-100 overflow-hidden">
-                <img
+              <div className="w-20 h-20 rounded-md bg-neutral-100 overflow-hidden relative">
+                <Image
                   src={finding.imageUrl}
                   alt={finding.title}
-                  className="w-full h-full object-cover"
+                  fill
+                  className="object-cover"
+                  unoptimized
                 />
               </div>
             </div>

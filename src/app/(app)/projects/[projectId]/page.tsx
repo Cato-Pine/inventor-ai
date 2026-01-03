@@ -18,6 +18,7 @@ import {
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import type { Project } from '@/types/database'
+import type { PostgrestError } from '@supabase/supabase-js'
 
 interface ProjectPageProps {
   params: Promise<{ projectId: string }>
@@ -41,7 +42,7 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
     .from('projects')
     .select('*')
     .eq('id', projectId)
-    .single() as { data: Project | null; error: any }
+    .single() as { data: Project | null; error: PostgrestError | null }
 
   if (error || !project) {
     notFound()

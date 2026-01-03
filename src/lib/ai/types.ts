@@ -24,7 +24,7 @@ export interface NoveltyFinding {
   url?: string
   similarity_score: number // 0-1: How similar to user's invention
   source: string // e.g., "Google Search", "Amazon", "USPTO"
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
 }
 
 export interface NoveltyCheckRequest {

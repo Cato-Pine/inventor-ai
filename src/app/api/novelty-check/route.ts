@@ -5,6 +5,7 @@ import { runWebSearchAgent } from '@/lib/ai/web-search-agent'
 import { runRetailSearchAgent } from '@/lib/ai/retail-search-agent'
 import { runPatentSearchAgent } from '@/lib/ai/patent-search-agent'
 import type { NoveltyCheckRequest, NoveltyCheckResponse, GraduatedTruthScores } from '@/lib/ai/types'
+import type { AiMemoryInsert } from '@/types/database'
 
 export async function POST(request: Request) {
   try {
@@ -114,7 +115,7 @@ export async function POST(request: Request) {
 
     // Optionally save results to database if projectId provided
     if (projectId) {
-      await supabase.from('ai_memory').insert({
+      const memoryData: AiMemoryInsert = {
         user_id: user.id,
         project_id: projectId,
         memory_type: 'insight',
@@ -124,7 +125,8 @@ export async function POST(request: Request) {
           timestamp: new Date().toISOString(),
         },
         importance_score: overall_novelty_score,
-      } as any)
+      }
+      await supabase.from('ai_memory').insert(memoryData)
     }
 
     return NextResponse.json(response)

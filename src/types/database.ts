@@ -240,7 +240,11 @@ export type UpdateTables<T extends keyof Database['public']['Tables']> =
 // Convenience exports
 export type Profile = Tables<'profiles'>
 export type Project = Tables<'projects'>
+export type ProjectInsert = InsertTables<'projects'>
 export type Conversation = Tables<'conversations'>
+export type ConversationInsert = InsertTables<'conversations'>
 export type Message = Tables<'messages'>
+export type MessageInsert = InsertTables<'messages'>
 export type AiMemory = Tables<'ai_memory'>
+export type AiMemoryInsert = InsertTables<'ai_memory'>
 export type KnowledgeArticle = Tables<'knowledge_articles'>

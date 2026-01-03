@@ -1,12 +1,11 @@
 import { createClient } from '@/lib/supabase/server'
 import { Header } from '@/components/layout/header'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { ArrowLeft, Download, RefreshCw } from 'lucide-react'
+import { ArrowLeft } from 'lucide-react'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import type { Project } from '@/types/database'
+import type { PostgrestError } from '@supabase/supabase-js'
 import { NoveltyCheckClient } from './novelty-check-client'
 
 interface NoveltyPageProps {
@@ -21,7 +20,7 @@ export default async function NoveltyPage({ params }: NoveltyPageProps) {
     .from('projects')
     .select('*')
     .eq('id', projectId)
-    .single() as { data: Project | null; error: any }
+    .single() as { data: Project | null; error: PostgrestError | null }
 
   if (error || !project) {
     notFound()

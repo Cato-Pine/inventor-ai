@@ -11,7 +11,8 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { ArrowLeft, Lightbulb, Users, Target } from 'lucide-react'
 import Link from 'next/link'
-import type { Project } from '@/types/database'
+import type { Project, ProjectInsert } from '@/types/database'
+import type { PostgrestError } from '@supabase/supabase-js'
 
 export default function NewProjectPage() {
   const [name, setName] = useState('')
@@ -36,19 +37,21 @@ export default function NewProjectPage() {
       return
     }
 
+    const projectData: ProjectInsert = {
+      user_id: user.id,
+      name,
+      description,
+      problem_statement: problemStatement,
+      target_audience: targetAudience,
+      status: 'draft',
+      current_stage: 'market_research',
+    }
+
     const { data, error: insertError } = await supabase
       .from('projects')
-      .insert({
-        user_id: user.id,
-        name,
-        description,
-        problem_statement: problemStatement,
-        target_audience: targetAudience,
-        status: 'draft',
-        current_stage: 'market_research',
-      } as any)
+      .insert(projectData)
       .select()
-      .single() as { data: Project | null; error: any }
+      .single() as { data: Project | null; error: PostgrestError | null }
 
     if (insertError) {
       setError(insertError.message)

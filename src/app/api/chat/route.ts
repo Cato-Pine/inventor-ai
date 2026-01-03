@@ -1,7 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
-import type { Message, Project } from '@/types/database'
+import type { Message, Project, Conversation, ConversationInsert, MessageInsert } from '@/types/database'
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
@@ -50,23 +50,25 @@ export async function POST(request: Request) {
 
     if (!activeConversationId) {
       // Create a new conversation
+      const conversationData: ConversationInsert = {
+        user_id: user.id,
+        project_id: projectId || null,
+        agent_type: 'assistant',
+        title: message.substring(0, 100), // Use first part of message as title
+      }
+
       const { data: newConversation, error: convError } = await supabase
         .from('conversations')
-        .insert({
-          user_id: user.id,
-          project_id: projectId || null,
-          agent_type: 'assistant',
-          title: message.substring(0, 100), // Use first part of message as title
-        } as any)
+        .insert(conversationData)
         .select()
-        .single()
+        .single() as { data: Conversation | null; error: unknown }
 
-      if (convError) {
+      if (convError || !newConversation) {
         console.error('Failed to create conversation:', convError)
         return NextResponse.json({ error: 'Failed to create conversation' }, { status: 500 })
       }
 
-      activeConversationId = (newConversation as any).id
+      activeConversationId = newConversation.id
     }
 
     // Get conversation history if exists
@@ -123,7 +125,7 @@ export async function POST(request: Request) {
       response.content[0].type === 'text' ? response.content[0].text : ''
 
     // Save messages to database
-    await supabase.from('messages').insert([
+    const messagesToInsert: MessageInsert[] = [
       {
         conversation_id: activeConversationId,
         role: 'user',
@@ -134,7 +136,8 @@ export async function POST(request: Request) {
         role: 'assistant',
         content: assistantMessage,
       },
-    ] as any)
+    ]
+    await supabase.from('messages').insert(messagesToInsert)
 
     return NextResponse.json({
       message: assistantMessage,

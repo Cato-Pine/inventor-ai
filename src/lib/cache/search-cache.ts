@@ -16,6 +16,16 @@ export interface CachedSearchResult {
   expires_at: string | null // null = never expires
 }
 
+interface SearchCacheInsert {
+  query_hash: string
+  search_type: 'patent' | 'web' | 'retail'
+  query_params: Record<string, unknown>
+  results: unknown[]
+  result_count: number
+  source_api: string
+  expires_at: string | null
+}
+
 // Storage limits (keep last N results per type)
 const STORAGE_LIMITS = {
   patent: Infinity, // Never delete patent results
@@ -93,7 +103,7 @@ export async function cacheSearchResults(
       : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
 
     // Upsert the cache entry
-    await supabase.from('search_cache').upsert({
+    const cacheData: SearchCacheInsert = {
       query_hash: queryHash,
       search_type: searchType,
       query_params: queryParams,
@@ -101,7 +111,8 @@ export async function cacheSearchResults(
       result_count: results.length,
       source_api: sourceApi,
       expires_at: expiresAt,
-    } as any, {
+    }
+    await supabase.from('search_cache').upsert(cacheData, {
       onConflict: 'query_hash',
     })
 

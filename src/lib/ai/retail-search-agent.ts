@@ -1,15 +1,18 @@
 // Retail Search Agent - Uses real eBay API data for novelty checking
-// Phase 1: Fetch real products from eBay Browse API
+// Phase 1: Fetch real products from eBay Browse API (or Brave Search fallback)
 // Phase 2: Pass real data to Claude for novelty analysis
 
 import Anthropic from '@anthropic-ai/sdk'
-import type { NoveltyResult, NoveltyCheckRequest, NoveltyFinding } from './types'
+import type { NoveltyResult, NoveltyCheckRequest, NoveltyFinding, GraduatedTruthScores } from './types'
 import {
   searchSimilarProducts,
   isEbayConfigured,
-  getCredentialStatus,
   type EbayProduct,
 } from '../search/ebay'
+import {
+  runMultipleSearches,
+  type BraveSearchResult,
+} from '../search/brave'
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
@@ -89,26 +92,283 @@ const ANALYSIS_PROMPT = {
 }`,
 }
 
-export async function runRetailSearchAgent(
+/**
+ * Generate product-focused search queries for Brave
+ * Targets major retail sites and shopping results
+ */
+function generateProductSearchQueries(
+  inventionName: string,
+  _description: string,
+  keyFeatures?: string[]
+): string[] {
+  const queries: string[] = []
+
+  // Direct product searches on major retailers
+  queries.push(`"${inventionName}" site:amazon.com`)
+  queries.push(`buy "${inventionName}" product`)
+  queries.push(`"${inventionName}" shop price`)
+
+  // Feature-based product search
+  if (keyFeatures && keyFeatures.length > 0) {
+    const topFeatures = keyFeatures.slice(0, 2).join(' ')
+    queries.push(`buy ${topFeatures} product`)
+  }
+
+  // Generic shopping search
+  queries.push(`${inventionName} for sale`)
+
+  return queries.slice(0, 4) // Limit to 4 queries
+}
+
+/**
+ * Convert Brave search result to NoveltyFinding format for retail context
+ */
+function braveResultToRetailFinding(result: BraveSearchResult): NoveltyFinding {
+  // Try to identify the retailer from the URL
+  const url = new URL(result.url)
+  const retailer = identifyRetailer(url.hostname)
+
+  return {
+    title: result.title,
+    description: result.description,
+    url: result.url,
+    similarity_score: 0, // Will be set by Claude analysis
+    source: retailer || 'Web Search',
+    metadata: {
+      retailer,
+      age: result.age,
+    },
+  }
+}
+
+/**
+ * Identify retailer from hostname
+ */
+function identifyRetailer(hostname: string): string | undefined {
+  const retailers: Record<string, string> = {
+    'amazon.com': 'Amazon',
+    'www.amazon.com': 'Amazon',
+    'ebay.com': 'eBay',
+    'www.ebay.com': 'eBay',
+    'walmart.com': 'Walmart',
+    'www.walmart.com': 'Walmart',
+    'target.com': 'Target',
+    'www.target.com': 'Target',
+    'etsy.com': 'Etsy',
+    'www.etsy.com': 'Etsy',
+    'aliexpress.com': 'AliExpress',
+    'www.aliexpress.com': 'AliExpress',
+    'bestbuy.com': 'Best Buy',
+    'www.bestbuy.com': 'Best Buy',
+    'homedepot.com': 'Home Depot',
+    'www.homedepot.com': 'Home Depot',
+    'lowes.com': "Lowe's",
+    'www.lowes.com': "Lowe's",
+  }
+  return retailers[hostname]
+}
+
+/**
+ * Run retail search using Brave as fallback when eBay isn't configured
+ */
+async function runBraveRetailSearch(
   request: NoveltyCheckRequest
 ): Promise<NoveltyResult> {
-  // Check if eBay is configured
-  if (!isEbayConfigured()) {
+  // Generate product-focused queries
+  const searchQueries = generateProductSearchQueries(
+    request.invention_name,
+    request.description,
+    request.key_features
+  )
+
+  // Run searches
+  const searchResponse = await runMultipleSearches(searchQueries, 5)
+
+  // Handle API errors
+  if (searchResponse.error && searchResponse.results.length === 0) {
     return {
       agent_type: 'retail_search',
       is_novel: false,
       confidence: 0,
       findings: [],
-      summary: getCredentialStatus(),
+      summary: `Retail search failed: ${searchResponse.error}`,
       truth_scores: {
         objective_truth: 0,
         practical_truth: 0,
         completeness: 0,
         contextual_scope: 0,
       },
-      search_query_used: request.invention_name,
+      search_query_used: searchQueries[0],
       timestamp: new Date(),
     }
+  }
+
+  // No results = potentially novel
+  if (searchResponse.results.length === 0) {
+    return {
+      agent_type: 'retail_search',
+      is_novel: true,
+      confidence: 0.6,
+      findings: [],
+      summary: 'No similar products found in retail search. This suggests the invention may be novel in the marketplace.',
+      truth_scores: {
+        objective_truth: 0.7,
+        practical_truth: 0.6,
+        completeness: 0.4,
+        contextual_scope: 0.6,
+      },
+      search_query_used: searchQueries.join(' | '),
+      timestamp: new Date(),
+    }
+  }
+
+  // Convert to findings
+  const findings = searchResponse.results.map(braveResultToRetailFinding)
+
+  // Analyze with Claude
+  const analysisResult = await analyzeRetailResults(
+    request,
+    searchResponse.results,
+    searchQueries
+  )
+
+  // Update findings with similarity scores
+  const updatedFindings = findings.map((finding, index) => {
+    const analysis = analysisResult.product_analyses?.find(
+      (a: { result_index: number }) => a.result_index === index
+    )
+    if (analysis) {
+      return {
+        ...finding,
+        similarity_score: analysis.similarity_score,
+        description: analysis.analysis || finding.description,
+      }
+    }
+    return finding
+  })
+
+  // Sort by similarity
+  updatedFindings.sort((a, b) => b.similarity_score - a.similarity_score)
+
+  return {
+    agent_type: 'retail_search',
+    is_novel: analysisResult.is_novel,
+    confidence: analysisResult.confidence,
+    findings: updatedFindings.slice(0, 10),
+    summary: analysisResult.summary,
+    truth_scores: analysisResult.truth_scores,
+    search_query_used: searchQueries.join(' | '),
+    timestamp: new Date(),
+  }
+}
+
+/**
+ * Analyze Brave retail search results with Claude
+ */
+async function analyzeRetailResults(
+  request: NoveltyCheckRequest,
+  results: BraveSearchResult[],
+  queriesUsed: string[]
+): Promise<{
+  is_novel: boolean
+  confidence: number
+  product_analyses: Array<{ result_index: number; similarity_score: number; analysis: string }>
+  summary: string
+  truth_scores: GraduatedTruthScores
+}> {
+  const formattedResults = results
+    .map(
+      (result, index) =>
+        `[Result ${index}]
+Title: ${result.title}
+URL: ${result.url}
+Description: ${result.description}
+${result.age ? `Age: ${result.age}` : ''}`
+    )
+    .join('\n\n')
+
+  const prompt = `You are a retail market analyst. Analyze these REAL web search results to determine if similar products to the invention already exist for sale.
+
+## Invention to Check:
+- **Name**: ${request.invention_name}
+- **Description**: ${request.description}
+- **Problem Statement**: ${request.problem_statement || 'Not provided'}
+- **Key Features**: ${request.key_features?.join(', ') || 'Not provided'}
+
+## Search Queries Used:
+${queriesUsed.map((q, i) => `${i + 1}. "${q}"`).join('\n')}
+
+## REAL Search Results (${results.length} total):
+${formattedResults}
+
+Analyze each result and return ONLY valid JSON:
+{
+  "is_novel": boolean (true if no close product matches found),
+  "confidence": number (0-1),
+  "product_analyses": [
+    {
+      "result_index": number,
+      "similarity_score": number (0-1, how similar the product is),
+      "analysis": "1-2 sentence explanation"
+    }
+  ],
+  "summary": "2-3 sentences on retail availability",
+  "truth_scores": {
+    "objective_truth": number,
+    "practical_truth": number,
+    "completeness": number,
+    "contextual_scope": number
+  }
+}
+
+CRITICAL: Base analysis ONLY on provided results. Focus on actual products for sale, not just mentions.`
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-3-5-sonnet-20241022',
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: prompt }],
+    })
+
+    const content = response.content[0]
+    if (content.type !== 'text') {
+      throw new Error('Unexpected response type')
+    }
+
+    let jsonText = content.text.trim()
+    const jsonMatch =
+      jsonText.match(/```json\n([\s\S]*?)\n```/) ||
+      jsonText.match(/```\n([\s\S]*?)\n```/)
+
+    if (jsonMatch) {
+      jsonText = jsonMatch[1]
+    }
+
+    return JSON.parse(jsonText)
+  } catch (error) {
+    console.error('Retail analysis error:', error)
+    return {
+      is_novel: false,
+      confidence: 0.3,
+      product_analyses: [],
+      summary: 'Analysis failed. Manual review of search results recommended.',
+      truth_scores: {
+        objective_truth: 0.5,
+        practical_truth: 0.4,
+        completeness: 0.3,
+        contextual_scope: 0.4,
+      },
+    }
+  }
+}
+
+export async function runRetailSearchAgent(
+  request: NoveltyCheckRequest
+): Promise<NoveltyResult> {
+  // Check if eBay is configured - if not, use Brave Search fallback
+  if (!isEbayConfigured()) {
+    console.log('eBay not configured, using Brave Search for retail discovery')
+    return runBraveRetailSearch(request)
   }
 
   // PHASE 1: Fetch real products from eBay
