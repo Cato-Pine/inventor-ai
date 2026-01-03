@@ -45,23 +45,45 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Message is required' }, { status: 400 })
     }
 
+    // Create or get conversation
+    let activeConversationId = conversationId
+
+    if (!activeConversationId) {
+      // Create a new conversation
+      const { data: newConversation, error: convError } = await supabase
+        .from('conversations')
+        .insert({
+          user_id: user.id,
+          project_id: projectId || null,
+          agent_type: 'assistant',
+          title: message.substring(0, 100), // Use first part of message as title
+        })
+        .select()
+        .single()
+
+      if (convError) {
+        console.error('Failed to create conversation:', convError)
+        return NextResponse.json({ error: 'Failed to create conversation' }, { status: 500 })
+      }
+
+      activeConversationId = newConversation.id
+    }
+
     // Get conversation history if exists
     let messages: { role: 'user' | 'assistant'; content: string }[] = []
 
-    if (conversationId) {
-      const { data: historyData } = await supabase
-        .from('messages')
-        .select('role, content')
-        .eq('conversation_id', conversationId)
-        .order('created_at', { ascending: true })
-        .limit(20) as { data: Pick<Message, 'role' | 'content'>[] | null }
+    const { data: historyData } = await supabase
+      .from('messages')
+      .select('role, content')
+      .eq('conversation_id', activeConversationId)
+      .order('created_at', { ascending: true })
+      .limit(20) as { data: Pick<Message, 'role' | 'content'>[] | null }
 
-      if (historyData) {
-        messages = historyData.map((m) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        }))
-      }
+    if (historyData) {
+      messages = historyData.map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      }))
     }
 
     // Add the new message
@@ -100,25 +122,23 @@ export async function POST(request: Request) {
     const assistantMessage =
       response.content[0].type === 'text' ? response.content[0].text : ''
 
-    // Save messages to database if conversationId exists
-    if (conversationId) {
-      await supabase.from('messages').insert([
-        {
-          conversation_id: conversationId,
-          role: 'user',
-          content: message,
-        },
-        {
-          conversation_id: conversationId,
-          role: 'assistant',
-          content: assistantMessage,
-        },
-      ] as any)
-    }
+    // Save messages to database
+    await supabase.from('messages').insert([
+      {
+        conversation_id: activeConversationId,
+        role: 'user',
+        content: message,
+      },
+      {
+        conversation_id: activeConversationId,
+        role: 'assistant',
+        content: assistantMessage,
+      },
+    ] as any)
 
     return NextResponse.json({
       message: assistantMessage,
-      conversationId,
+      conversationId: activeConversationId,
     })
   } catch (error) {
     console.error('Chat API error:', error)

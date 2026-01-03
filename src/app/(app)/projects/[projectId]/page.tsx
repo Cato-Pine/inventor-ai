@@ -87,7 +87,7 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
               {project.description || 'No description provided'}
             </p>
           </div>
-          <Link href={`/projects/${project.id}/research`}>
+          <Link href={`/projects/${project.id}/chat`}>
             <Button size="lg" className="gap-2">
               <Play className="h-4 w-4" />
               Start Research
@@ -189,7 +189,7 @@ export default async function ProjectPage({ params }: ProjectPageProps) {
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <Link href={`/projects/${project.id}/research`}>
+              <Link href={`/projects/${project.id}/chat`}>
                 <Button variant="outline" className="w-full h-auto py-4 flex-col gap-2">
                   <Search className="h-5 w-5" />
                   <span>Market Research</span>
