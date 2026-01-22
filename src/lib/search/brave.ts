@@ -53,7 +53,14 @@ export async function braveSearch(
 ): Promise<BraveSearchResponse> {
   const apiKey = process.env.BRAVE_API_KEY
 
+  // Debug: Log key presence and length (not the actual key!)
+  const keyInfo = apiKey
+    ? `Key present (${apiKey.length} chars, starts with ${apiKey.substring(0, 4)}...)`
+    : 'Key NOT SET'
+  console.log(`[Brave API] ${keyInfo}, query: "${query}"`)
+
   if (!apiKey) {
+    console.error('[Brave API] BRAVE_API_KEY environment variable is not set')
     return {
       query,
       results: [],
@@ -69,7 +76,10 @@ export async function braveSearch(
       search_lang: 'en',
     })
 
-    const response = await fetch(`${BRAVE_API_URL}?${params}`, {
+    const url = `${BRAVE_API_URL}?${params}`
+    console.log(`[Brave API] Fetching: ${url}`)
+
+    const response = await fetch(url, {
       method: 'GET',
       headers: {
         Accept: 'application/json',
@@ -78,15 +88,24 @@ export async function braveSearch(
       },
     })
 
+    // Debug: Log response status and headers
+    console.log(`[Brave API] Response status: ${response.status} ${response.statusText}`)
+    const rateLimitRemaining = response.headers.get('X-RateLimit-Remaining')
+    const rateLimitLimit = response.headers.get('X-RateLimit-Limit')
+    if (rateLimitRemaining || rateLimitLimit) {
+      console.log(`[Brave API] Rate limit: ${rateLimitRemaining}/${rateLimitLimit} remaining`)
+    }
+
     if (!response.ok) {
       const errorText = await response.text()
+      console.error(`[Brave API] Error response body: ${errorText}`)
 
       // Handle specific error codes
       if (response.status === 401) {
         return {
           query,
           results: [],
-          error: 'Invalid Brave API key. Please check your BRAVE_API_KEY.',
+          error: `Invalid Brave API key (401). Key length: ${apiKey.length}. Response: ${errorText.substring(0, 200)}`,
         }
       }
 
@@ -94,16 +113,18 @@ export async function braveSearch(
         return {
           query,
           results: [],
-          error: 'Brave API rate limit exceeded. Free tier allows 2,000 queries/month.',
+          error: `Brave API rate limit exceeded (429). Response: ${errorText.substring(0, 200)}`,
         }
       }
 
       return {
         query,
         results: [],
-        error: `Brave API error (${response.status}): ${errorText}`,
+        error: `Brave API error (${response.status}): ${errorText.substring(0, 200)}`,
       }
     }
+
+    console.log(`[Brave API] Success! Parsing response...`)
 
     const data: BraveAPIResponse = await response.json()
 
@@ -175,7 +196,7 @@ export function generateNoveltySearchQueries(
   // "Buy" intent search to find existing products
   queries.push(`buy ${inventionName}`)
 
-  return queries.slice(0, 4) // Limit to 4 queries to stay within rate limits
+  return queries.slice(0, 2) // Limit to 2 queries to preserve rate limits (2000/month free tier)
 }
 
 /**
