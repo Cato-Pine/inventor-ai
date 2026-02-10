@@ -160,43 +160,19 @@ async function fetchPatents(request: NoveltyCheckRequest): Promise<{
   let hasPatentsViewData = false
   let hasPTABData = false
 
-  // Search both APIs in parallel with retry
-  const [patentsViewResult, ptabResult] = await Promise.all([
-    // PatentsView (PRIMARY) - all granted patents
-    withRetry(async () => {
-      const result = await searchPatentsViewWithQueries(querySet.allQueries, {
-        maxResultsPerQuery: 10,
-      })
-      if (result.errors.some(e => e.includes('PATENTSVIEW_API_KEY'))) {
-        // Not configured - not a retryable error
-        throw new Error(result.errors[0])
-      }
-      if (result.errors.length > 0 && result.patents.length === 0) {
-        // API errors but no data - might be retryable
-        throw new Error(result.errors[0])
-      }
-      return result
-    }, { maxAttempts: 2, initialDelayMs: 1500 }),
-
-    // PTAB (SUPPLEMENTARY) - challenged patents
-    withRetry(async () => {
-      const result = await searchUSPTOWithMultipleQueries(querySet.allQueries, {
-        maxResultsPerQuery: 5,
-        includeProceedings: true,
-        includeDecisions: true,
-        includeAppeals: true,
-      })
-      if (result.errors.some(e => e.includes('USPTO_API_KEY'))) {
-        // Not configured - not a retryable error
-        throw new Error(result.errors[0])
-      }
-      if (result.errors.length > 0 && result.patents.length === 0) {
-        // API errors but no data - might be retryable
-        throw new Error(result.errors[0])
-      }
-      return result
-    }, { maxAttempts: 2, initialDelayMs: 1500 }),
-  ])
+  // Search PatentsView (PRIMARY) - all granted patents
+  const patentsViewResult = await withRetry(async () => {
+    const result = await searchPatentsViewWithQueries(querySet.allQueries, {
+      maxResultsPerQuery: 10,
+    })
+    if (result.errors.some(e => e.includes('PATENTSVIEW_API_KEY'))) {
+      throw new Error(result.errors[0])
+    }
+    if (result.errors.length > 0 && result.patents.length === 0) {
+      throw new Error(result.errors[0])
+    }
+    return result
+  }, { maxAttempts: 2, initialDelayMs: 1500 })
 
   // Process PatentsView results
   if (patentsViewResult.success && patentsViewResult.data) {
@@ -206,31 +182,44 @@ async function fetchPatents(request: NoveltyCheckRequest): Promise<{
     console.log(`[Patent Search] PatentsView: ${patentsViewPatents.length} patents found`)
   } else {
     const errMsg = patentsViewResult.lastError?.message || 'PatentsView search failed'
-    // Only add as error if it's not just "key not configured"
     if (!errMsg.includes('PATENTSVIEW_API_KEY')) {
       allErrors.push(`PatentsView: ${errMsg}`)
     } else {
-      console.log('[Patent Search] PatentsView: API key not configured (using PTAB only)')
+      console.log('[Patent Search] PatentsView: API key not configured')
     }
   }
 
-  // Process PTAB results
-  if (ptabResult.success && ptabResult.data) {
-    ptabPatents = ptabResult.data.patents
-    hasPTABData = ptabPatents.length > 0
-    allErrors.push(...ptabResult.data.errors)
-    console.log(`[Patent Search] PTAB: ${ptabPatents.length} challenged patents found`)
-  } else {
-    const errMsg = ptabResult.lastError?.message || 'PTAB search failed'
-    if (!errMsg.includes('USPTO_API_KEY')) {
-      allErrors.push(`PTAB: ${errMsg}`)
-    } else {
-      console.log('[Patent Search] PTAB: API key not configured')
-    }
-  }
+  // PTAB (SUPPLEMENTARY) - disabled, PatentsView covers all granted patents
+  // To re-enable, uncomment the PTAB search block below:
+  // const ptabResult = await withRetry(async () => {
+  //   const result = await searchUSPTOWithMultipleQueries(querySet.allQueries, {
+  //     maxResultsPerQuery: 5,
+  //     includeProceedings: true,
+  //     includeDecisions: true,
+  //     includeAppeals: true,
+  //   })
+  //   if (result.errors.some(e => e.includes('USPTO_API_KEY'))) {
+  //     throw new Error(result.errors[0])
+  //   }
+  //   if (result.errors.length > 0 && result.patents.length === 0) {
+  //     throw new Error(result.errors[0])
+  //   }
+  //   return result
+  // }, { maxAttempts: 2, initialDelayMs: 1500 })
+  //
+  // if (ptabResult.success && ptabResult.data) {
+  //   ptabPatents = ptabResult.data.patents
+  //   hasPTABData = ptabPatents.length > 0
+  //   allErrors.push(...ptabResult.data.errors)
+  //   console.log(`[Patent Search] PTAB: ${ptabPatents.length} challenged patents found`)
+  // } else {
+  //   const errMsg = ptabResult.lastError?.message || 'PTAB search failed'
+  //   if (!errMsg.includes('USPTO_API_KEY')) {
+  //     allErrors.push(`PTAB: ${errMsg}`)
+  //   }
+  // }
 
-  // Merge results (PatentsView data preferred, PTAB marks challenged patents)
-  const mergedPatents = mergePatentResults(patentsViewPatents, ptabPatents)
+  const mergedPatents = patentsViewPatents
 
   console.log(`[Patent Search] Combined: ${mergedPatents.length} unique patents`)
 
@@ -342,17 +331,16 @@ export async function runPatentSearchAgent(
     // Phase 1: Fetch patents from PatentsView (primary) + PTAB (supplementary)
     const { patents, querySet, errors, hasPatentsViewData, hasPTABData } = await fetchPatents(request)
 
-    // Check if we have NO API access at all (both keys missing)
+    // Check if we have NO API access (PatentsView key missing)
     const patentsViewKeyMissing = errors.some(e => e.includes('PATENTSVIEW_API_KEY'))
-    const ptabKeyMissing = errors.some(e => e.includes('USPTO_API_KEY'))
 
-    if (patentsViewKeyMissing && ptabKeyMissing) {
+    if (patentsViewKeyMissing) {
       return {
         agent_type: 'patent_search',
         is_novel: false,
         confidence: 0,
         findings: [],
-        summary: 'No patent API keys configured. Please add PATENTSVIEW_API_KEY and/or USPTO_API_KEY to your environment variables.',
+        summary: 'PATENTSVIEW_API_KEY not configured. Please add it to your environment variables.',
         truth_scores: {
           objective_truth: 0,
           practical_truth: 0,
@@ -368,7 +356,7 @@ export async function runPatentSearchAgent(
     const serverErrors = errors.filter(e => e.includes('500') || e.includes('Internal Server Error'))
 
     // If we found no patents AND had server errors from ALL configured APIs, we can't trust the results
-    const allApisErrored = !hasPatentsViewData && !hasPTABData && serverErrors.length > 0
+    const allApisErrored = !hasPatentsViewData && serverErrors.length > 0
     if (allApisErrored) {
       return {
         agent_type: 'patent_search',
