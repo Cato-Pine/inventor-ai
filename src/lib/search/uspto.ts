@@ -799,8 +799,9 @@ export interface PatentsViewPatent {
 
 export interface PatentsViewSearchResult {
   patents: PatentsViewPatent[]
-  total_patent_count: number
+  total_hits: number
   count: number
+  error: boolean
 }
 
 /**
@@ -911,7 +912,7 @@ export class PatentsViewClient {
 
       return {
         patents: data.patents || [],
-        totalCount: data.total_patent_count || 0,
+        totalCount: data.total_hits || 0,
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
