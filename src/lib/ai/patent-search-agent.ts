@@ -302,10 +302,11 @@ CRITICAL:
   // Extract JSON from response
   let jsonText = response.text.trim()
   const jsonMatch = jsonText.match(/```json\n([\s\S]*?)\n```/) ||
-                    jsonText.match(/```\n([\s\S]*?)\n```/)
+                    jsonText.match(/```\n([\s\S]*?)\n```/) ||
+                    jsonText.match(/\{[\s\S]*\}/)
 
   if (jsonMatch) {
-    jsonText = jsonMatch[1]
+    jsonText = jsonMatch[1] || jsonMatch[0]
   }
 
   return JSON.parse(jsonText) as AnalysisResult
