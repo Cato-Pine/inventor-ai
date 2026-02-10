@@ -887,9 +887,9 @@ export class PatentsViewClient {
    * Uses _text_phrase for precise matching (falls back to _text_any if no results)
    *
    * Query operators:
-   * - _text_phrase: exact phrase match (best precision, may miss results)
+   * - _text_phrase: exact phrase match (best precision, may miss results) - used first
    * - _text_all: all words must appear (too strict - often returns 0)
-   * - _text_any: any word matches (too broad - millions of irrelevant hits)
+   * - _text_any: any word matches (broader) - used as fallback when phrase returns 0
    */
   async searchPatents(params: {
     searchTerms: string[]
@@ -900,9 +900,15 @@ export class PatentsViewClient {
     try {
       const searchText = params.searchTerms.join(' ')
 
-      // Use _text_any for reliable matching - AI analysis in Phase 2 filters for relevance
-      // _text_phrase was causing intermittent 400 errors from PatentsView API
-      const data = await this.executeSearch(searchText, '_text_any', params.limit || 25)
+      // Try _text_phrase first for precise matching
+      let data = await this.executeSearch(searchText, '_text_phrase', params.limit || 25)
+
+      // Fall back to _text_any if phrase search finds nothing
+      if ((!data.patents || data.patents.length === 0) && searchText.split(' ').length > 1) {
+        console.log(`[PatentsView] Phrase search returned 0 results, falling back to _text_any`)
+        await this.enforceRateLimit()
+        data = await this.executeSearch(searchText, '_text_any', params.limit || 25)
+      }
 
       return {
         patents: data.patents || [],
