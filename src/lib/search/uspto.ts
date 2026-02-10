@@ -839,8 +839,56 @@ export class PatentsViewClient {
   }
 
   /**
+   * Execute a search request against PatentsView API
+   */
+  private async executeSearch(
+    searchText: string,
+    operator: '_text_phrase' | '_text_any',
+    limit: number
+  ): Promise<PatentsViewSearchResult> {
+    const query = {
+      _or: [
+        { [operator]: { patent_title: searchText } },
+        { [operator]: { patent_abstract: searchText } },
+      ]
+    }
+
+    const response = await fetch(PATENTSVIEW_BASE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': this.apiKey,
+      },
+      body: JSON.stringify({
+        q: query,
+        f: ['patent_id', 'patent_title', 'patent_abstract', 'patent_date', 'patent_type', 'patent_kind', 'assignees'],
+        o: { size: limit },
+        s: [{ patent_date: 'desc' }],
+      }),
+    })
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new Error('PatentsView API authentication failed. Check PATENTSVIEW_API_KEY.')
+      }
+      if (response.status === 429) {
+        throw new Error('PatentsView API rate limit exceeded (45/min). Please wait.')
+      }
+      const errorBody = await response.text()
+      throw new Error(`PatentsView API error ${response.status}: ${errorBody}`)
+    }
+
+    return await response.json() as PatentsViewSearchResult
+  }
+
+  /**
    * Search patents using PatentsView API
-   * Uses _text_any operator for full-text search across title and abstract
+   * Uses _text_phrase for precise matching (falls back to _text_any if no results)
+   *
+   * Query operators:
+   * - _text_phrase: exact phrase match (best precision, may miss results)
+   * - _text_all: all words must appear (too strict - often returns 0)
+   * - _text_any: any word matches (too broad - millions of irrelevant hits)
    */
   async searchPatents(params: {
     searchTerms: string[]
@@ -849,42 +897,17 @@ export class PatentsViewClient {
     await this.enforceRateLimit()
 
     try {
-      // Build query using _text_any for text search
-      // Searches both title and abstract
       const searchText = params.searchTerms.join(' ')
-      const query = {
-        _or: [
-          { _text_any: { patent_title: searchText } },
-          { _text_any: { patent_abstract: searchText } },
-        ]
+
+      // Try _text_phrase first for precise matching
+      let data = await this.executeSearch(searchText, '_text_phrase', params.limit || 25)
+
+      // Fall back to _text_any if phrase search finds nothing
+      if ((!data.patents || data.patents.length === 0) && searchText.split(' ').length > 1) {
+        console.log(`[PatentsView] Phrase search returned 0 results, falling back to _text_any`)
+        await this.enforceRateLimit()
+        data = await this.executeSearch(searchText, '_text_any', params.limit || 25)
       }
-
-      const response = await fetch(PATENTSVIEW_BASE_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Api-Key': this.apiKey,
-        },
-        body: JSON.stringify({
-          q: query,
-          f: ['patent_id', 'patent_title', 'patent_abstract', 'patent_date', 'patent_type', 'patent_kind', 'assignees'],
-          o: { size: params.limit || 25 },
-          s: [{ patent_date: 'desc' }], // Most recent first
-        }),
-      })
-
-      if (!response.ok) {
-        if (response.status === 401 || response.status === 403) {
-          throw new Error('PatentsView API authentication failed. Check PATENTSVIEW_API_KEY.')
-        }
-        if (response.status === 429) {
-          throw new Error('PatentsView API rate limit exceeded (45/min). Please wait.')
-        }
-        const errorBody = await response.text()
-        throw new Error(`PatentsView API error ${response.status}: ${errorBody}`)
-      }
-
-      const data = await response.json() as PatentsViewSearchResult
 
       return {
         patents: data.patents || [],
