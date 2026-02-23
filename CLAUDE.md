@@ -7,7 +7,7 @@ AI-powered web app that guides inventors through market research & validation.
 - **Database**: Supabase (Postgres + Auth + pgvector)
 - **AI**: Anthropic Claude API
 - **Styling**: Tailwind CSS + shadcn/ui
-- **Hosting**: Vercel
+- **Hosting**: DigitalOcean VPS (do-stoic, 157.230.167.214) — Docker + Caddy reverse proxy
 
 ## Project Structure
 ```

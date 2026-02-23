@@ -1,0 +1,15 @@
+node_modules
+.next
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md
+IMPLEMENTATION_PLAN.md
+USPTO_PATENT_SEARCH_PLAN.md
+*.md
+!CLAUDE.md

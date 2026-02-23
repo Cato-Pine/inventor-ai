@@ -1,0 +1,20 @@
+services:
+  inventor-ai:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    container_name: inventor-ai
+    restart: unless-stopped
+    ports:
+      - "3100:3000"
+    env_file:
+      - .env
+    networks:
+      - n8n-network
+
+networks:
+  n8n-network:
+    name: n8n-docker-caddy_default
+    external: true
