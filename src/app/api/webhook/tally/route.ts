@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
 
 function verifySignature(body: string, signature: string | null): boolean {
   const secret = process.env.TALLY_SIGNING_SECRET
@@ -158,7 +160,7 @@ export async function POST(request: NextRequest) {
     raw_payload: payload,
   }
 
-  const { error } = await supabase.from('survey_responses').upsert(row, {
+  const { error } = await getSupabase().from('survey_responses').upsert(row, {
     onConflict: 'tally_response_id',
   })
 
