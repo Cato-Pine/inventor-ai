@@ -65,7 +65,7 @@ interface TallyWebhookPayload {
 
 function findField(fields: TallyField[], labelPattern: string): TallyField | undefined {
   return fields.find((f) =>
-    f.label.toLowerCase().includes(labelPattern.toLowerCase())
+    f.label?.toLowerCase().includes(labelPattern.toLowerCase())
   )
 }
 
