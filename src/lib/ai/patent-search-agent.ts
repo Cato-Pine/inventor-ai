@@ -14,13 +14,14 @@ import {
   type PatentReference,
   type PatentQuerySet,
 } from '../search/uspto'
+import { searchGooglePatentsWithQueries } from '../search/google-patents'
 import { withRetry } from '../search/retry'
 import { createCompletion } from './ai-client'
 
 const PATENT_ANALYSIS_PROMPT = {
   role: `You are a patent research specialist with expertise in prior art analysis and novelty assessment. You analyze REAL patent data from USPTO databases to assess patentability.`,
 
-  task: `Analyze the provided invention against REAL patent search results from USPTO databases (PatentsView for all granted patents + PTAB for challenged patents). Assess similarity, potential conflicts, and overall novelty.`,
+  task: `Analyze the provided invention against REAL patent search results from patent databases (PatentsView for granted US patents, Google Patents for international coverage, PTAB for challenged patents). Assess similarity, potential conflicts, and overall novelty.`,
 
   howTo: `
 1. Review the invention details carefully
@@ -90,6 +91,8 @@ function patentReferenceToFinding(
     sourceName = patent.isChallenged ? 'USPTO (Challenged)' : 'USPTO Patents'
   } else if (patent.source === 'USPTO_APPEALS') {
     sourceName = 'USPTO Appeals'
+  } else if (patent.source === 'GOOGLE_PATENTS') {
+    sourceName = 'Google Patents'
   }
 
   // Build description from analysis or available data
@@ -135,6 +138,7 @@ async function fetchPatents(request: NoveltyCheckRequest): Promise<{
   querySet: PatentQuerySet
   errors: string[]
   hasPatentsViewData: boolean
+  hasGooglePatentsData: boolean
   hasPTABData: boolean
 }> {
   // Generate AI-powered function-based queries
@@ -156,23 +160,42 @@ async function fetchPatents(request: NoveltyCheckRequest): Promise<{
 
   const allErrors: string[] = []
   let patentsViewPatents: PatentReference[] = []
+  let googlePatents: PatentReference[] = []
   let ptabPatents: PatentReference[] = []
   let hasPatentsViewData = false
+  let hasGooglePatentsData = false
   let hasPTABData = false
 
-  // Search PatentsView (PRIMARY) - all granted patents
-  const patentsViewResult = await withRetry(async () => {
-    const result = await searchPatentsViewWithQueries(querySet.allQueries, {
-      maxResultsPerQuery: 10,
-    })
-    if (result.errors.some(e => e.includes('PATENTSVIEW_API_KEY'))) {
-      throw new Error(result.errors[0])
-    }
-    if (result.errors.length > 0 && result.patents.length === 0) {
-      throw new Error(result.errors[0])
-    }
-    return result
-  }, { maxAttempts: 2, initialDelayMs: 1500 })
+  // Search PatentsView (US patents) and Google Patents (international) in parallel
+  const [patentsViewResult, googlePatentsResult] = await Promise.all([
+    // PatentsView (PRIMARY) - all granted US patents
+    withRetry(async () => {
+      const result = await searchPatentsViewWithQueries(querySet.allQueries, {
+        maxResultsPerQuery: 10,
+      })
+      if (result.errors.some(e => e.includes('PATENTSVIEW_API_KEY'))) {
+        throw new Error(result.errors[0])
+      }
+      if (result.errors.length > 0 && result.patents.length === 0) {
+        throw new Error(result.errors[0])
+      }
+      return result
+    }, { maxAttempts: 2, initialDelayMs: 1500 }),
+
+    // Google Patents via SerpApi (INTERNATIONAL) - 100+ patent offices
+    withRetry(async () => {
+      const result = await searchGooglePatentsWithQueries(querySet.allQueries, {
+        maxResultsPerQuery: 10,
+      })
+      if (result.errors.some(e => e.includes('SERPAPI_API_KEY'))) {
+        throw new Error(result.errors[0])
+      }
+      if (result.errors.length > 0 && result.patents.length === 0) {
+        throw new Error(result.errors[0])
+      }
+      return result
+    }, { maxAttempts: 2, initialDelayMs: 1500 }),
+  ])
 
   // Process PatentsView results
   if (patentsViewResult.success && patentsViewResult.data) {
@@ -186,6 +209,21 @@ async function fetchPatents(request: NoveltyCheckRequest): Promise<{
       allErrors.push(`PatentsView: ${errMsg}`)
     } else {
       console.log('[Patent Search] PatentsView: API key not configured')
+    }
+  }
+
+  // Process Google Patents results
+  if (googlePatentsResult.success && googlePatentsResult.data) {
+    googlePatents = googlePatentsResult.data.patents
+    hasGooglePatentsData = googlePatents.length > 0
+    allErrors.push(...googlePatentsResult.data.errors)
+    console.log(`[Patent Search] Google Patents: ${googlePatents.length} patents found`)
+  } else {
+    const errMsg = googlePatentsResult.lastError?.message || 'Google Patents search failed'
+    if (!errMsg.includes('SERPAPI_API_KEY')) {
+      allErrors.push(`Google Patents: ${errMsg}`)
+    } else {
+      console.log('[Patent Search] Google Patents: SerpApi key not configured')
     }
   }
 
@@ -219,15 +257,24 @@ async function fetchPatents(request: NoveltyCheckRequest): Promise<{
   //   }
   // }
 
-  const mergedPatents = patentsViewPatents
+  // Merge and deduplicate across all sources
+  const allPatents = [...patentsViewPatents, ...googlePatents]
+  const seen = new Set<string>()
+  const mergedPatents = allPatents.filter(p => {
+    const normalized = p.patentNumber.replace(/[\s-]/g, '').toUpperCase()
+    if (!normalized || seen.has(normalized)) return false
+    seen.add(normalized)
+    return true
+  })
 
-  console.log(`[Patent Search] Combined: ${mergedPatents.length} unique patents`)
+  console.log(`[Patent Search] Combined: ${mergedPatents.length} unique patents (PatentsView: ${patentsViewPatents.length}, Google Patents: ${googlePatents.length})`)
 
   return {
     patents: mergedPatents,
     querySet,
     errors: allErrors,
     hasPatentsViewData,
+    hasGooglePatentsData,
     hasPTABData,
   }
 }
@@ -284,7 +331,8 @@ ${PATENT_ANALYSIS_PROMPT.output}
 
 CRITICAL:
 - Analyze ONLY the real patents provided above - do not invent or simulate any patents
-- Patents from "USPTO_PATENTSVIEW" are from the comprehensive granted patents database
+- Patents from "USPTO_PATENTSVIEW" are from the comprehensive granted US patents database
+- Patents from "GOOGLE_PATENTS" are from Google Patents (covers 100+ international patent offices)
 - Patents from "USPTO_PTAB" or "USPTO_APPEALS" are challenged patents - these indicate contested technology areas
 - Patents marked with isChallenged=true have been involved in patent disputes
 - If no patents were found, assess novelty based on that fact
@@ -329,8 +377,8 @@ export async function runPatentSearchAgent(
       // which produces function/problem/mechanism/synonym query sets
     }
 
-    // Phase 1: Fetch patents from PatentsView (primary) + PTAB (supplementary)
-    const { patents, querySet, errors, hasPatentsViewData, hasPTABData } = await fetchPatents(request)
+    // Phase 1: Fetch patents from PatentsView (US) + Google Patents (international) + PTAB (supplementary)
+    const { patents, querySet, errors, hasPatentsViewData, hasGooglePatentsData, hasPTABData } = await fetchPatents(request)
 
     // Check if we have NO API access (PatentsView key missing)
     const patentsViewKeyMissing = errors.some(e => e.includes('PATENTSVIEW_API_KEY'))
@@ -361,7 +409,7 @@ export async function runPatentSearchAgent(
     )
 
     // If we found no patents AND had API errors, we can't trust the results
-    const allApisErrored = !hasPatentsViewData && apiErrors.length > 0
+    const allApisErrored = !hasPatentsViewData && !hasGooglePatentsData && apiErrors.length > 0
     if (allApisErrored) {
       return {
         agent_type: 'patent_search',
@@ -408,13 +456,15 @@ export async function runPatentSearchAgent(
     const errorPenalty = errorRate > 0 ? (1 - errorRate * 0.3) : 1
 
     // Truth scores based on data source quality
-    // PatentsView success = high scores (covers 95% of patents)
-    // PTAB-only = low scores (covers <5% of patents)
+    // PatentsView = US patents (95% US coverage), Google Patents = international (100+ offices)
+    // Both together = best coverage
+    const hasAnyData = hasPatentsViewData || hasGooglePatentsData
+    const hasBothSources = hasPatentsViewData && hasGooglePatentsData
     const truthScores = {
-      objective_truth: hasPatentsViewData ? 0.95 * errorPenalty : (hasPTABData ? 0.6 * errorPenalty : 0),
-      practical_truth: hasPatentsViewData ? 0.9 * errorPenalty : (hasPTABData ? 0.5 * errorPenalty : 0),
-      completeness: hasPatentsViewData ? 0.85 * errorPenalty : (hasPTABData ? 0.25 * errorPenalty : 0),
-      contextual_scope: hasPatentsViewData ? 0.9 * queryDiversity * errorPenalty : (hasPTABData ? 0.4 * queryDiversity * errorPenalty : 0),
+      objective_truth: hasBothSources ? 0.97 * errorPenalty : (hasAnyData ? 0.9 * errorPenalty : (hasPTABData ? 0.6 * errorPenalty : 0)),
+      practical_truth: hasBothSources ? 0.95 * errorPenalty : (hasAnyData ? 0.85 * errorPenalty : (hasPTABData ? 0.5 * errorPenalty : 0)),
+      completeness: hasBothSources ? 0.92 * errorPenalty : (hasAnyData ? 0.8 * errorPenalty : (hasPTABData ? 0.25 * errorPenalty : 0)),
+      contextual_scope: hasBothSources ? 0.95 * queryDiversity * errorPenalty : (hasAnyData ? 0.85 * queryDiversity * errorPenalty : (hasPTABData ? 0.4 * queryDiversity * errorPenalty : 0)),
     }
 
     return {
@@ -422,7 +472,7 @@ export async function runPatentSearchAgent(
       is_novel: analysis.is_novel,
       confidence: analysis.confidence * errorPenalty,
       findings: findings.slice(0, 10), // Top 10 most relevant
-      summary: buildSummary(analysis, patents.length, errors, querySet, hasPatentsViewData, hasPTABData),
+      summary: buildSummary(analysis, patents.length, errors, querySet, hasPatentsViewData, hasGooglePatentsData, hasPTABData),
       truth_scores: truthScores,
       search_query_used: querySet.allQueries.join('; '),
       timestamp: new Date(),
@@ -458,6 +508,7 @@ function buildSummary(
   errors: string[],
   querySet?: PatentQuerySet,
   hasPatentsViewData?: boolean,
+  hasGooglePatentsData?: boolean,
   hasPTABData?: boolean
 ): string {
   const parts: string[] = []
@@ -468,11 +519,12 @@ function buildSummary(
   // Add data source context
   if (patentCount > 0) {
     const sources: string[] = []
-    if (hasPatentsViewData) sources.push('USPTO PatentsView (all granted patents)')
+    if (hasPatentsViewData) sources.push('USPTO PatentsView (all granted US patents)')
+    if (hasGooglePatentsData) sources.push('Google Patents (100+ international patent offices)')
     if (hasPTABData) sources.push('USPTO PTAB (challenged patents)')
     parts.push(`\n\nBased on ${patentCount} real patents from ${sources.join(' + ')}.`)
-  } else if (hasPatentsViewData) {
-    parts.push('\n\nNo matching patents found in USPTO database (comprehensive search completed).')
+  } else if (hasPatentsViewData || hasGooglePatentsData) {
+    parts.push('\n\nNo matching patents found in patent databases (comprehensive search completed).')
   } else if (hasPTABData) {
     parts.push('\n\nNo matching patents found in USPTO PTAB (challenged patents only - limited coverage).')
   } else {
@@ -514,10 +566,14 @@ function buildSummary(
   }
 
   // Add coverage disclaimer based on data sources
-  if (hasPatentsViewData) {
-    parts.push('\n\nNOTE: This search covers granted US patents via PatentsView. A professional patent search is still recommended before filing.')
+  if (hasPatentsViewData && hasGooglePatentsData) {
+    parts.push('\n\nNOTE: This search covers US patents (PatentsView) and international patents (Google Patents, 100+ offices). A professional patent search is still recommended before filing.')
+  } else if (hasPatentsViewData) {
+    parts.push('\n\nNOTE: This search covers granted US patents via PatentsView. Configure SERPAPI_API_KEY for international patent coverage. A professional patent search is still recommended before filing.')
+  } else if (hasGooglePatentsData) {
+    parts.push('\n\nNOTE: This search covers international patents via Google Patents. Configure PATENTSVIEW_API_KEY for comprehensive US patent coverage. A professional patent search is still recommended before filing.')
   } else if (hasPTABData) {
-    parts.push('\n\nIMPORTANT: This search only covers USPTO PTAB (challenged patents, <5% of all patents). For comprehensive coverage, configure PATENTSVIEW_API_KEY or consult a patent attorney.')
+    parts.push('\n\nIMPORTANT: This search only covers USPTO PTAB (challenged patents, <5% of all patents). For comprehensive coverage, configure PATENTSVIEW_API_KEY and SERPAPI_API_KEY, or consult a patent attorney.')
   }
 
   return parts.join('')

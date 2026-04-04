@@ -99,7 +99,7 @@ export interface PatentReference {
   title: string
   filingDate: string
   status: string
-  source: 'USPTO_PTAB' | 'USPTO_APPEALS' | 'USPTO_PATENTSVIEW'
+  source: 'USPTO_PTAB' | 'USPTO_APPEALS' | 'USPTO_PATENTSVIEW' | 'GOOGLE_PATENTS'
   trialType?: string
   url: string
   relevanceContext?: string
