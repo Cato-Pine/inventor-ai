@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
-const MAX_USERS = 10
+const MAX_USERS = 15
 
 export async function POST(request: Request) {
   const { email, password, fullName, redirectTo } = await request.json()
